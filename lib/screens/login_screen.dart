@@ -1,0 +1,126 @@
+import 'package:provider/provider.dart';
+import 'package:flutter/material.dart';
+import '../state/auth_state.dart';
+import 'chats_screen.dart';
+
+class LoginScreen extends StatefulWidget {
+  const LoginScreen({super.key});
+  @override
+  State<LoginScreen> createState() => _LoginScreenState();
+}
+
+class _LoginScreenState extends State<LoginScreen> {
+  final _phone = TextEditingController();
+  final _password = TextEditingController();
+  final _passwordConfirm = TextEditingController();
+  final _email = TextEditingController();
+  final _firstName = TextEditingController();
+  final _lastName = TextEditingController();
+  bool _isRegister = false;
+
+  @override
+  void dispose() {
+    _phone.dispose(); _password.dispose(); _passwordConfirm.dispose();
+    _email.dispose(); _firstName.dispose(); _lastName.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    final auth = context.read<AuthState>();
+    final phone = _phone.text.trim();
+    final password = _password.text;
+    if (phone.isEmpty || password.isEmpty) return;
+
+    bool ok;
+    if (_isRegister) {
+      if (password != _passwordConfirm.text) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Пароли не совпадают')),
+        );
+        return;
+      }
+      ok = await auth.register(
+        phone: phone, password: password, passwordConfirm: _passwordConfirm.text,
+        email: _email.text.trim().isEmpty ? null : _email.text.trim(),
+        firstName: _firstName.text.trim().isEmpty ? null : _firstName.text.trim(),
+        lastName: _lastName.text.trim().isEmpty ? null : _lastName.text.trim(),
+      );
+    } else {
+      ok = await auth.login(phone, password);
+    }
+
+    if (ok && mounted) {
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(builder: (_) => const ChatsScreen()),
+      );
+    } else if (auth.error != null && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(auth.error!)),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final auth = context.watch<AuthState>();
+    return Scaffold(
+      appBar: AppBar(title: Text(_isRegister ? 'Регистрация' : 'Вход')),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            TextField(
+              controller: _phone,
+              decoration: const InputDecoration(labelText: 'Телефон'),
+              keyboardType: TextInputType.phone,
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _password,
+              decoration: const InputDecoration(labelText: 'Пароль'),
+              obscureText: true,
+            ),
+            if (_isRegister) ...[
+              const SizedBox(height: 12),
+              TextField(
+                controller: _passwordConfirm,
+                decoration: const InputDecoration(labelText: 'Повтор пароля'),
+                obscureText: true,
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _firstName,
+                decoration: const InputDecoration(labelText: 'Имя (необязательно)'),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _lastName,
+                decoration: const InputDecoration(labelText: 'Фамилия (необязательно)'),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _email,
+                decoration: const InputDecoration(labelText: 'Email (необязательно)'),
+                keyboardType: TextInputType.emailAddress,
+              ),
+            ],
+            const SizedBox(height: 24),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton(
+                onPressed: auth.loading ? null : _submit,
+                child: auth.loading
+                    ? const CircularProgressIndicator()
+                    : Text(_isRegister ? 'Зарегистрироваться' : 'Войти'),
+              ),
+            ),
+            TextButton(
+              onPressed: () => setState(() => _isRegister = !_isRegister),
+              child: Text(_isRegister ? 'У меня уже есть аккаунт' : 'Создать аккаунт'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
