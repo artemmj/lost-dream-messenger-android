@@ -1,7 +1,7 @@
 # Lost Dream Messenger — Flutter-клиент
 
 Кроссплатформенный клиент (Android, iOS, macOS, Windows, Linux, web) к Django-бэкенду
-[`lost-dream-messenger`](../lost-dream-messenger): личные и групповые чаты, real-time через
+[lost-dream-messenger](https://github.com/artemmj/lost-dream-messenger): личные и групповые чаты, real-time через
 WebSocket, presence, счётчики непрочитанного, JWT-авторизация.
 
 До этого репозиторий был нативным Android-приложением на Kotlin/Compose. Оно удалено из рабочего
