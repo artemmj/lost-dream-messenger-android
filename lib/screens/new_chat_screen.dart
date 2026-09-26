@@ -1,8 +1,10 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/user.dart';
 import '../services/api.dart';
 import '../state/chat_state.dart';
+import 'chat_screen.dart';
 
 class NewChatScreen extends StatefulWidget {
   const NewChatScreen({super.key});
@@ -16,31 +18,62 @@ class _NewChatScreenState extends State<NewChatScreen> {
   List<User> _results = [];
   final Set<User> _selected = {};
   bool _isGroup = false;
+  
+  // Timer для дебаунса поиска — отменяет предыдущие запросы (дефект №8)
+  Timer? _searchTimer;
 
   @override
   void dispose() {
-    _search.dispose(); _groupName.dispose();
+    // Отменяем все отложенные запросы поиска при закрытии экрана
+    _searchTimer?.cancel();
+    _search.dispose();
+    _groupName.dispose();
     super.dispose();
   }
 
-  Future<void> _doSearch(String q) async {
+  /// Выполняет поиск пользователей с дебаунсом 300 мс.
+  ///
+  /// Предыдущий таймер отменяется, чтобы не делать лишних запросов при быстром наборе текста.
+  /// Это решает дефект №8: поиск без отменяемого дебаунса создавал десяток запросов в scope `search` (20/мин).
+  void _debouncedSearch(String q) {
+    // Отменяем предыдущий таймер
+    _searchTimer?.cancel();
+    
     if (q.trim().isEmpty) {
       setState(() => _results = []);
       return;
     }
-    try {
-      final r = await Api().searchUsers(q.trim());
-      setState(() => _results = r);
-    } catch (_) {}
+    
+    // Создаём новый таймер на 300 мс
+    _searchTimer = Timer(const Duration(milliseconds: 300), () async {
+      try {
+        final r = await Api().searchUsers(q.trim());
+        if (mounted) {
+          setState(() => _results = r);
+        }
+      } catch (_) {
+        // Ошибки поиска silently игнорируются
+      }
+    });
   }
 
+  /// Создаёт личный чат с пользователем и открывает его.
+  ///
+  /// После создания загружаем список чатов, выбираем новый чат (открывает сокет),
+  /// затем заменяем текущий экран на ChatScreen вместо возврата в список (дефект №5).
   Future<void> _createPrivate(User u) async {
     try {
       final detail = await Api().createPrivateChat(u.id);
       final chat = context.read<ChatState>();
       await chat.loadChats();
       await chat.selectChat(detail.id);
-      if (mounted) Navigator.pop(context);
+      
+      // Вместо pop() используем pushReplacement, чтобы открыть чат напрямую
+      if (mounted) {
+        Navigator.pushReplacement(context, MaterialPageRoute(
+          builder: (_) => ChatScreen(chatId: detail.id),
+        ));
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -50,6 +83,10 @@ class _NewChatScreenState extends State<NewChatScreen> {
     }
   }
 
+  /// Создаёт групповой чат и открывает его.
+  ///
+  /// После создания загружаем список чатов, выбираем новый чат (открывает сокет),
+  /// затем заменяем текущий экран на ChatScreen вместо возврата в список (дефект №5).
   Future<void> _createGroup() async {
     if (_groupName.text.trim().isEmpty || _selected.isEmpty) return;
     try {
@@ -60,7 +97,13 @@ class _NewChatScreenState extends State<NewChatScreen> {
       final chat = context.read<ChatState>();
       await chat.loadChats();
       await chat.selectChat(detail.id);
-      if (mounted) Navigator.pop(context);
+      
+      // Вместо pop() используем pushReplacement, чтобы открыть чат напрямую
+      if (mounted) {
+        Navigator.pushReplacement(context, MaterialPageRoute(
+          builder: (_) => ChatScreen(chatId: detail.id),
+        ));
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -100,10 +143,7 @@ class _NewChatScreenState extends State<NewChatScreen> {
                 labelText: 'Поиск по телефону или имени',
                 prefixIcon: Icon(Icons.search),
               ),
-              onChanged: (v) => Future.delayed(
-                const Duration(milliseconds: 300),
-                () => _doSearch(v),
-              ),
+              onChanged: _debouncedSearch, // Используем дебаунс вместо Future.delayed
             ),
           ),
           if (_isGroup && _selected.isNotEmpty)

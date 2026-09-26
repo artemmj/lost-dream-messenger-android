@@ -1,7 +1,6 @@
 import 'package:provider/provider.dart';
 import 'package:flutter/material.dart';
 import '../state/auth_state.dart';
-import 'chats_screen.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -49,11 +48,11 @@ class _LoginScreenState extends State<LoginScreen> {
       ok = await auth.login(phone, password);
     }
 
-    if (ok && mounted) {
-      Navigator.of(context).pushReplacement(
-        MaterialPageRoute(builder: (_) => const ChatsScreen()),
-      );
-    } else if (auth.error != null && mounted) {
+    // После успешного входа навигация НЕ нужна: _Boot слушает AuthState через
+    // context.watch и сам перестроится на ChatsScreen. Если бы мы толкали маршрут
+    // поверх _Boot (как делалось раньше), logout не возвращал бы к форме входа —
+    // толкнутый ChatsScreen оставался бы поверх невидимого _Boot в стеке навигатора.
+    if (!ok && auth.error != null && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(auth.error!)),
       );

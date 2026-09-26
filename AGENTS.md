@@ -14,14 +14,14 @@ Django в корне, Vue-фронтенд в `frontend/`). Бэкенд — **�
 
 История: до Flutter здесь было нативное Android-приложение на Kotlin/Compose (Jetpack Compose,
 Hilt, Retrofit + kotlinx.serialization, OkHttp WebSocket, DataStore). Оно удалено из рабочего
-дерева, но сохранено в git: `git show 433543b --stat`, каталог `app/`. Kotlin-версия корректнее
-текущей в трёх местах, где Dart-переписывание наступило на те же грабли: порядок сообщений внутри
-страницы, заголовок `Origin` для WS-handshake, поведение личного канала уведомлений. При порче
-логики сверяться с ней быстрее, чем с бэкендом.
+дерева, но сохранено в git: `git show 433543b --stat`, каталог `app/`. Kotlin-версия была
+корректнее Dart-переписывания в трёх местах (порядок сообщений внутри страницы, заголовок `Origin`
+для WS-handshake, поведение личного канала уведомлений). Первые два устранены (дефекты №2 и №1);
+по личному каналу при спорных случаях всё равно быстрее свериться с Kotlin-кодом, чем с бэкендом.
 
 Текущее состояние: **прототип**. Компилируется, основной сценарий «войти → список чатов → открыть
-чат → отправить» частично работает, но WebSocket-слой не поднимается (см. дефект №1), а несколько
-экранов ведут себя неправильно.
+чат → отправить / получить» работает, в том числе real-time. Критичные дефекты №1–№6 и дебаунс
+поиска (№8) исправлены; остаются открытые дефекты №7 и №9–№27 (см. раздел 7).
 
 ## 2. Окружение и команды
 
@@ -51,7 +51,8 @@ flutter run -d <device>  # хост бэкенда правится в lib/confi
 lib/
 ├── config.dart                  # AppConfig: host, apiBase (http://host/api/v1), wsBase (ws://host/ws)
 ├── main.dart                    # MultiProvider(AuthState, ChatState) → MaterialApp → _Boot
-│                                # _Boot: bootstrap() решает, показать LoginScreen или ChatsScreen
+│                                # _Boot: bootstrap(), далее выбор экрана через watch<AuthState>
+│                                # (isAuthenticated ? ChatsScreen : LoginScreen) — без ручной навигации
 ├── models/                      # Плоские DTO с фабриками fromJson, без codegen
 │   ├── user.dart                # User(id, phone, email?, firstName?, lastName?) + displayName
 │   ├── me.dart                  # Me = User + lastSeen? (парсится, не отображается)
@@ -62,27 +63,33 @@ lib/
 │   ├── api.dart                 # Api — синглтон. _request(method, path): 401 → refresh → один повтор.
 │   │                            # ApiException(statusCode, message), _extractError — DRF detail / {field:[...]}
 │   ├── token_store.dart         # TokenStore: статические access/refresh/save/clear поверх SharedPreferences
-│   └── ws.dart                  # WsClient(path, onEvent, onClose, onReconnect): connect/ready/listen,
+│   └── ws.dart                  # WsClient(path, onEvent, onClose, onReconnect, onOpen):
+│                                # IOWebSocketChannel + заголовок Origin, connect/ready/listen,
 │                                # ретрай через 2 с, noReconnectCodes = {4001,4003,4004,4009,4029}
 ├── state/
 │   ├── auth_state.dart          # me, loading, error; bootstrap/login/register/updateProfile/logout
 │   └── chat_state.dart          # chats, currentChatDetail, messages, selectedChatId, onlineUsers,
-│                                # wsStatus, пагинация истории; сокет чата + сокет уведомлений
+│                                # wsStatus, пагинация истории; сокет чата + сокет уведомлений;
+│                                # clearAll() — полная очистка при logout
 └── screens/
-    ├── login_screen.dart        # Вход/регистрация в одном экране, переключение _isRegister
+    ├── login_screen.dart        # Вход/регистрация в одном экране, переключение _isRegister;
+    │                            # после входа НИКАКОЙ ручной навигации — экран решает _Boot
     ├── chats_screen.dart        # Список чатов, FAB «новый чат», иконки профиля и выхода
     ├── chat_screen.dart         # Лента, поле ввода, шапка со статусом WS, вход в участников группы
-    ├── new_chat_screen.dart     # Поиск пользователей, режим «личный / групповой», чипы выбранных
-    ├── group_members_screen.dart# Участники группы с ролью и кнопкой удаления
+    ├── new_chat_screen.dart     # Поиск с дебаунсом на Timer, режим «личный / групповой», чипы;
+    │                            # после создания — pushReplacement на ChatScreen
+    ├── group_members_screen.dart# Участники: чип «админ», удаление других (админу), выход из чата (себе)
     └── profile_screen.dart      # PATCH своих полей (имя, фамилия, email, телефон)
-test/widget_test.dart            # Шаблонный тест счётчика — не компилируется (см. дефект №15)
+test/widget_test.dart            # Шаблонный тест счётчика — не компилируется (см. дефект №17)
 android/ ios/ macos/ windows/ linux/ web/   # Сгенерированные `flutter create` цели
 ```
 
 Навигация — только `Navigator.push(MaterialPageRoute(...))` из `chats_screen.dart` и
-`chat_screen.dart`. Именованных маршрутов, `go_router`, deep links и state restoration нет.
-`ChatScreen` получает `chatId` конструктором, но данные берёт из глобального `ChatState`
-(`selectedChatId`), то есть состояние чата живёт вне маршрута.
+`chat_screen.dart`, плюс `pushReplacement` в `new_chat_screen.dart` (открытие созданного чата).
+Именованных маршрутов, `go_router`, deep links и state restoration нет. Переходы Login↔Chats —
+исключительная прерогатива `_Boot`: маршруты поверх него толкать нельзя (иначе logout не
+возвращает к форме входа). `ChatScreen` получает `chatId` конструктором, но данные берёт из
+глобального `ChatState` (`selectedChatId`), то есть состояние чата живёт вне маршрута.
 
 ## 4. Архитектура
 
@@ -91,9 +98,11 @@ android/ ios/ macos/ windows/ linux/ web/   # Сгенерированные `fl
 `context.read<T>()` (вызов методов). Отдельных ViewModel на экран нет, DI нет: `Api` — синглтон
 (`lib/services/api.dart:19-21`), `TokenStore` — статические методы.
 
-**Загрузка сессии.** `_Boot` (`lib/main.dart:36-65`) хранит результат `auth.bootstrap()` в локальном
-`_authed` и не слушает `AuthState` дальше: после `logout()` дерево не перестраивается на
-`LoginScreen` — отсюда дефект №4.
+**Загрузка сессии.** `_Boot` (`lib/main.dart`) сначала показывает спиннер, пока `auth.bootstrap()`
+проверяет сохранённые токены; дальше выбор экрана полностью реактивный: `context.watch<AuthState>()`
+в `build()` и `isAuthenticated ? ChatsScreen() : LoginScreen()`. Любая смена состояния авторизации
+(login, logout, `bootstrap`) перестраивает `_Boot` сам — ручная навигация между этими экранами
+запрещена (см. дефект №4 в истории и раздел 3).
 
 **REST.** `Api._request` собирает заголовки (`Content-Type`, `Authorization: Bearer` из
 `TokenStore`), при 401 делает `POST /auth/refresh/` и повторяет исходный запрос ровно один раз
@@ -102,25 +111,26 @@ android/ ios/ macos/ windows/ linux/ web/   # Сгенерированные `fl
 или первое сообщение валидации поля).
 
 **WebSocket.** Один класс `WsClient` на оба канала, различаются только `path`:
-`chat/<uuid>/` и `notifications/`. Токен передаётся query-параметром `?token=<jwt>` (заголовки в
-WS-handshake бэкенд не читает). Жизненный цикл:
+`chat/<uuid>/` и `notifications/`. Токен передаётся query-параметром `?token=<jwt>` (Authorization в
+WS-handshake бэкенд не читает), но заголовок `Origin` обязателен — его шлёт клиент через
+`IOWebSocketChannel.connect` (см. дефект №1). Жизненный цикл:
 
-- сокет чата открывается в `ChatState.selectChat()` (`lib/state/chat_state.dart:44-60`) после
-  загрузки первой страницы, деталей и `markRead`; закрывается в `closeChat()` и `dispose()`;
+- сокет чата открывается в `ChatState.selectChat()` после загрузки первой страницы, деталей и
+  `markRead`; статус `connecting` сменяется на `connected` через колбэк `onOpen` (`setConnected()`);
+  закрывается в `closeChat()`, `clearAll()` и `dispose()`;
 - сокет уведомлений открывается в `ChatsScreen.initState()` (`lib/screens/chats_screen.dart:18-23`)
-  и закрывается при выходе из аккаунта;
+  и закрывается при выходе из аккаунта (`clearAll()`);
 - переподключение — фиксированные 2 с, кроме кодов `noReconnectCodes`
-  (`lib/services/ws.dart:9`): там ретрай только продлевал бы блокировку по лимитам.
+  (`lib/services/ws.dart:15`): там ретрай только продлевал бы блокировку по лимитам.
 
 **Поток события.** Кадр WS → `WsClient.onEvent` → `ChatState._handleChatEvent` (события открытого
 чата: сообщение без `type`, `user_status`, `initial_presence`, `messages_read`) или
 `_handleNotification` (личный канал: `new_message`, `chat_read`, `chat_deleted`, `chat_renamed`,
 `member_removed`) → мутация списков → `notifyListeners()` → пересборка экранов.
 
-**Отправка.** `ChatState.sendMessage` (`lib/state/chat_state.dart:109-126`): если сокет жив —
-`{'text': ...}` в WS и возврат `null` (своё сообщение придёт эхом из broadcast группы), иначе
-`POST /chats/{id}/send/` и добавление в ленту. Экран по возврату `null`/не-`null` решает,
-скроллить ли ленту — отсюда дефект №12.
+**Отправка.** `ChatState.sendMessage`: если сокет жив — `{'text': ...}` в WS и возврат `null`
+(своё сообщение придёт эхом из broadcast группы), иначе `POST /chats/{id}/send/` и добавление
+в ленту. Экран по возврату `null`/не-`null` решает, скроллить ли ленту — отсюда дефект №12.
 
 ## 5. Контракт бэкенда
 
@@ -191,7 +201,7 @@ WS-handshake бэкенд не читает). Жизненный цикл:
 | 4004 | чат удалён | не переподключаться, `removeChat` |
 | 4009 | кап одновременных соединений (5 на пользователя) | не переподключаться |
 | 4029 | частые подключения (>20/мин) | не переподключаться |
-| 403 (HTTP, не WS-код) | handshake отклонён `AllowedHostsOriginValidator` | сейчас — бесконечный ретрай (дефект №1) |
+| 403 (HTTP, не WS-код) | handshake отклонён `AllowedHostsOriginValidator` | исправлено: клиент шлёт `Origin` через `IOWebSocketChannel` (дефект №1) |
 
 ### Лимиты бэкенда
 
@@ -206,7 +216,7 @@ WS-handshake бэкенд не читает). Жизненный цикл:
 | `send` | 60/мин | REST-фолбэк отправки |
 | `read` | 120/мин | `markRead` при каждом открытии чата |
 | `write` | 30/мин | создание/переименование/удаление чата, участники |
-| `search` | 20/мин | поиск в `new_chat_screen` — сгорает из-за дефекта №8 |
+| `search` | 20/мин | поиск в `new_chat_screen` — дебаунс с отменой на `Timer` исправлен (дефект №8) |
 | `profile` | 20/мин | `PATCH /users/me/` |
 
 WS-лимиты (`messenger/ratelimit.py`): сообщения 10/10 с (иначе кадр `{error}`), подключения 20/60 с
@@ -220,7 +230,7 @@ WS-лимиты (`messenger/ratelimit.py`): сообщения 10/10 с (ина�
 ## 6. Соглашения кода
 
 - UI-строки — по-русски, захардкожены (локализации нет); тексты ошибок приходят с бэкенда
-  по-английски для 429 и по-русски для业务-ошибок — показываются как есть.
+  по-английски для 429 и по-русски для бизнес-ошибок — показываются как есть.
 - Модели: обычные классы с `final`-полями и фабрикой `fromJson`, snake_case ключи JSON читаются
   напрямую, `copyWith` только там, где реально нужен. Codegen (`json_serializable`, `freezed`)
   не используется и не добавлять без необходимости.
@@ -238,40 +248,34 @@ WS-лимиты (`messenger/ratelimit.py`): сообщения 10/10 с (ина�
 
 ### Критичные (ломают основной сценарий)
 
-1. **WS-handshake без `Origin` → 403.** `lib/services/ws.dart:34` использует
-   `WebSocketChannel.connect(uri)`, который заголовки не отправляет; `WebSocketChannel.connect`
-   в `web_socket_channel` 3.0.3 параметра `headers` не имеет вовсе — нужен
-   `IOWebSocketChannel.connect(uri, headers: {'Origin': 'http://<host>'})` из
-   `package:web_socket_channel/io.dart` (на web-цели заголовки недоступны). Сейчас `await ready`
-   бросает исключение, `catch (_) { _scheduleReconnect(); }` (`:51-53`) не вызывает `onClose`,
-   поэтому статус остаётся `connecting`, а ретраи идут каждые 2 с бесконечно.
-2. **Порядок сообщений перевёрнут.** `lib/state/chat_state.dart:66` (`page.reversed`) и `:89`
-   (`[...older.reversed, ...]`): бэкенд отдаёт страницу уже по возрастанию времени
-   (`messenger/views.py`, `MessageSerializer(page[::-1])`). Лента показывается сверху вниз от
-   новых к старым, дозагрузка вставляет старую страницу не с того края. Комментарий на `:65`
-   описывает поведение, которого на бэкенде нет.
-3. **Статус соединения не обновляется.** `setConnected()` (`lib/state/chat_state.dart:252`) не
-   вызывается ниоткуда; `_wsStatus = 'connected'` проставляется только в `_handleChatReconnect`
-   (`:243`), то есть после переподключения. Шапка чата показывает «подключение…» даже на живом
-   сокете. В `WsClient` нет колбэка `onOpen` — только `onReconnect` с хрупким условием
-   `_hadConnection && _retryTimer != null` (`lib/services/ws.dart:36-40`; `_retryTimer` после
-   срабатывания не обнуляется).
-4. **Выход из аккаунта → пустой экран.** `lib/screens/chats_screen.dart:44-49` пушит
-   `_RedirectToLogin`, а тот рендерит `SizedBox.shrink()` (`:106-110`). `LoginScreen` не
-   показывается. Правильно — либо пушить `LoginScreen`, либо сделать `_Boot` наблюдателем
-   `AuthState` (`lib/main.dart:42-64`) и убрать ручную навигацию из `LoginScreen._submit`
-   (`lib/screens/login_screen.dart:52-55`).
-5. **Созданный чат не открывается.** `lib/screens/new_chat_screen.dart:39-43` и `:56-63`:
-   вызываются `loadChats()` и `selectChat(detail.id)` (открывает сокет чата), затем
-   `Navigator.pop()` — пользователь оказывается в списке, хотя `selectedChatId` установлен и
-   сокет жив. Нужен `pushReplacement` на `ChatScreen`.
-6. **Удаление себя из группы.** `lib/screens/group_members_screen.dart:31` сравнивает
-   `m.user.id` с `ChatState.selectedChatId` (id чата) — условие всегда истинно, кнопка удаления
-   рисуется в том числе на собственной строке. Сравнивать надо с `AuthState.me?.id`; заодно
-   там же отсутствует кнопка «выйти из чата» и обработка правила «единственного админа удалить
-   нельзя».
+1. **WS-handshake без `Origin` → 403.** ✅ **ИСПРАВЛЕНО**. `WsClient.connect()` (`lib/services/ws.dart:73`)
+   теперь использует `IOWebSocketChannel.connect(uri, headers: {'Origin': 'http://<host>'})`.
+   На web-платформе заголовки недоступны браузером — требуется настройка бэкенда (см. №24).
+2. **Порядок сообщений перевёрнут.** ✅ **ИСПРАВЛЕНО**. Убраны `.reversed` в `ChatState._loadFirstPage`
+   и `ChatState.loadOlderMessages`, так как бэкенд уже отдаёт страницу по возрастанию времени
+   (`messenger/views.py`: `MessageSerializer(page[::-1])`).
+3. **Статус соединения не обновляется.** ✅ **ИСПРАВЛЕНО**. Добавлен колбэк `onOpen` в `WsClient`, который вызывает
+   `setConnected()` при успешном handshake. Шапка чата теперь корректно показывает «на связи».
+4. **Выход из аккаунта → пустой экран.** ✅ **ИСПРАВЛЕНО**. `_Boot` в `lib/main.dart` выбирает экран через
+   `context.watch<AuthState>()` прямо в `build()`: login/logout вызывают `notifyListeners()` и дерево
+   перестраивается само — `isAuthenticated ? ChatsScreen() : LoginScreen()`. Ручная навигация убрана с двух
+   сторон: из `chats_screen.dart` (кнопка выхода больше не пушит `_RedirectToLogin` с `SizedBox.shrink()`)
+   и из `login_screen.dart:52-55` (после входа больше не пушится `ChatsScreen` маршрутом поверх `_Boot` —
+   именно этот толкнутый маршрут оставался поверх перестроенного `_Boot` и блокировал возврат к форме входа
+   при logout). Правило: экраны не должны толкать маршруты поверх `_Boot`, навигацию между Login/Chats
+   решает только `_Boot`. Побочный хвост того же дефекта: после logout продолжали идти REST- и
+   WS-запросы — добавлен `ChatState.clearAll()` (закрывает оба сокета и обнуляет всё состояние),
+   вызывается из кнопки выхода в `chats_screen.dart` перед `auth.logout()`.
+5. **Созданный чат не открывается.** ✅ **ИСПРАВЛЕНО**. В `_createPrivate` и `_createGroup`
+   (`lib/screens/new_chat_screen.dart`) вместо `Navigator.pop()` теперь
+   `Navigator.pushReplacement(... ChatScreen(chatId: detail.id) ...)`.
+   После создания чата пользователь сразу попадает в него, а не возвращается в список.
+6. **Удаление себя из группы.** ✅ **ИСПРАВЛЕНО**. В `lib/screens/group_members_screen.dart:30` сравнение исправлено с
+   `ChatState.selectedChatId` (id чата) на `AuthState.me?.id`. Добавлена кнопка выхода из чата для себя (иконка
+   `exit_to_app`). Обработка ошибки «единственного админа удалить нельзя» делегирована бэкенду — сообщение об ошибке
+   показывается пользователю.
 7. **Выбор участников группы теряет состояние.** `_selected` — `Set<User>`
-   (`lib/screens/new_chat_screen.dart:17`), а `User` (`lib/models/user.dart`) не переопределяет
+   (`lib/screens/new_chat_screen.dart:19`), а `User` (`lib/models/user.dart`) не переопределяет
    `==`/`hashCode`. Каждый поиск создаёт новые экземпляры, поэтому `_selected.contains(u)` для
    того же человека даёт `false`: чекбоксы сбрасываются, а в `member_ids` могут попасть дубли —
    бэкенд на это отвечает 400 (`validate_member_ids` в `messenger/serializers.py`). Хранить
@@ -279,24 +283,24 @@ WS-лимиты (`messenger/ratelimit.py`): сообщения 10/10 с (ина�
 
 ### Функциональные
 
-8. **Поиск без отменяемого дебаунса.** `lib/screens/new_chat_screen.dart:103-106` —
-   `Future.delayed` на каждое изменение поля: запросы не отменяются и не схлопываются, при
-   наборе имени улетает десяток запросов в scope `search` (20/мин) → 429. Нужен `Timer` с
-   `cancel()`.
-9. **Кадры `{error: ...}` теряются.** `lib/state/chat_state.dart:200-231`: у error-кадра нет ни
-   `type`, ни `id`, поэтому switch не делает ничего. Пустое сообщение, текст длиннее 5000
-   символов и срабатывание анти-флуда (10 сообщений/10 с) пользователь не видит — ввод просто
-   очищается (`lib/screens/chat_screen.dart:46`).
-10. **`messages_read` обрабатывается грубо.** `lib/state/chat_state.dart:225-230` помечает
-    прочитанными все сообщения и игнорирует `reader_id` (переменная объявлена и не используется),
-    хотя бэкенд рассылает событие и самому читателю.
+8. **Поиск без отменяемого дебаунса.** ✅ **ИСПРАВЛЕНО**. В `lib/screens/new_chat_screen.dart` вместо
+   `Future.delayed` на каждое изменение поля теперь `Timer? _searchTimer` с `cancel()` перед новым
+   запросом (`_debouncedSearch`) и отменой в `dispose()`: набор имени больше не сжигает лимит
+   `search` (20/мин) серией лишних запросов.
+9. **Кадры `{error: ...}` теряются.** `lib/state/chat_state.dart:280-327` (`_handleChatEvent`): у
+   error-кадра нет ни `type`, ни `id`, поэтому switch не делает ничего. Пустое сообщение, текст
+   длиннее 5000 символов и срабатывание анти-флуда (10 сообщений/10 с) пользователь не видит —
+   ввод просто очищается (`lib/screens/chat_screen.dart:46`).
+10. **`messages_read` обрабатывается грубо.** `lib/state/chat_state.dart:307-312` помечает
+    прочитанными все сообщения и игнорирует `reader_id` (поле читается в кадре, но не
+    используется), хотя бэкенд рассылает событие и самому читателю.
 11. **Пагинация игнорируется.** `Api.listChats` (`lib/services/api.dart:167-172`) всегда берёт
     страницу 1 — чаты дальше первых 50 не видны; `Api.messages` (`:213-218`) выбрасывает `next`,
-    поэтому `hasMoreMessages` угадывается по `length == 50` (`lib/state/chat_state.dart:67,91`) и
+    поэтому `hasMoreMessages` угадывается по `length == 50` (`lib/state/chat_state.dart:87,123`) и
     врёт, когда сообщений ровно 50.
 12. **Лента не прокручивается к новому сообщению.** Автоскролл завязан на `sent != null`
     (`lib/screens/chat_screen.dart:45-55`), а WS-эхо возвращает `null`
-    (`lib/state/chat_state.dart:115`). Кроме того, `ListView` не `reverse: true`, а при
+    (`lib/state/chat_state.dart:159`). Кроме того, `ListView` не `reverse: true`, а при
     дозагрузке истории (`:33-37`) позиция скролла не сохраняется — список прыгает.
 13. **Системный «назад» не закрывает чат.** `closeChat()` вызывается только с крестика в шапке
     (`lib/screens/chat_screen.dart:89-95`); `PopScope` нет, поэтому свайп/кнопка назад оставляет
@@ -306,8 +310,8 @@ WS-лимиты (`messenger/ratelimit.py`): сообщения 10/10 с (ина�
     но `AuthState.register` (`lib/state/auth_state.dart:53-59`) затем всё равно вызывает `login()`
     — лишний запрос в scope `auth` (10/мин). Комментарий `lib/services/api.dart:136-137`
     («Register возвращает токены?») устарел и вводит в заблуждение.
-15. **Ошибки глушатся.** `catch (_) {}` в `lib/state/chat_state.dart:41,69,76,93,106`,
-    `lib/state/auth_state.dart:23`, `lib/screens/new_chat_screen.dart:34`: ни офлайн, ни 429,
+15. **Ошибки глушатся.** `catch (_) {}` в `lib/state/chat_state.dart:45,89,99,125,142,160`,
+    `lib/state/auth_state.dart:23`, `lib/screens/new_chat_screen.dart:54`: ни офлайн, ни 429,
     ни 403 не доходят до UI — экран выглядит пустым или устаревшим.
 16. **Нет обработки разрыва сети и смены токена в живых сокетах.** После refresh сокеты не
     переподключаются с новым токеном; при 4001 (`_closedByUser == false`, код в
@@ -321,12 +325,13 @@ WS-лимиты (`messenger/ratelimit.py`): сообщения 10/10 с (ина�
     завершаются ошибкой, а других тестов в проекте нет.
 18. **Неиспользуемый импорт** `dart:async` в `lib/state/chat_state.dart:1` (`Timer`/`Completer`
     там не применяются).
-19. **Мёртвый код.** Не вызывается: `ChatState.setConnected` (`:252`), `ChatState.renameChat`
-    (`:133`), `ChatState.deleteChat` (`:128`), `Api.addMember` (`lib/services/api.dart:231`);
+19. **Мёртвый код.** Не вызывается: `ChatState.renameChat` (`lib/state/chat_state.dart:184`),
+    `ChatState.deleteChat` (`:176`), `Api.addMember` (`lib/services/api.dart:231`);
     `ChatState.onlineUsers` (`:18`) заполняется, но не отображается; `Me.lastSeen`
     (`lib/models/me.dart:7`) парсится и не используется; пакет `intl` объявлен в `pubspec.yaml`,
     но не импортирован — время форматируется вручную (`lib/screens/chat_screen.dart:187`).
-    Либо доводить до UI, либо удалять.
+    Либо доводить до UI, либо удалять. (`setConnected` из этого списка больше не мёртвый:
+    подключён к `WsClient.onOpen` — см. дефект №3.)
 20. **Строковая типизация там, где есть enum.** `lib/screens/chat_screen.dart:82` —
     `detail?.type.name == 'group'` вместо `== ChatType.group` (мешает отсутствие импорта
     `models/chat.dart`); `wsStatus` — строки `'connected'/'connecting'/'disconnected'`
@@ -361,7 +366,6 @@ WS-лимиты (`messenger/ratelimit.py`): сообщения 10/10 с (ина�
 
 - переименование группы и удаление чата из UI (методы есть в `ChatState`, вызовов нет);
 - добавление участника в существующую группу (`Api.addMember`);
-- выход из чата самим участником;
 - отображение presence: точки «в сети» в шапке чата и в списке участников, счётчик
   «N в сети из M», `last_seen` («был в сети …»);
 - пагинация списка чатов и корректный `next` в истории;
@@ -393,12 +397,10 @@ WS-лимиты (`messenger/ratelimit.py`): сообщения 10/10 с (ина�
 
 ## 10. Порядок работ, если доводить до рабочего состояния
 
-1. Дефекты №1–№3 (`Origin`, порядок сообщений, статус соединения) — без них real-time не работает
-   вовсе, а лента отображается неправильно.
-2. №4–№7 (выход, открытие созданного чата, удаление себя, выбор участников) — ломаются базовые
-   пользовательские сценарии.
-3. №8–№16 — поведение под нагрузкой и обратная связь: дебаунс поиска, error-кадры, пагинация,
-   скролл, всплывающие ошибки.
-4. №17–№20 — анализатор, тесты, мёртвый код.
-5. №21–№25 — платформенные конфиги, если нужны не-Android цели.
-6. Раздел 8 — функциональные пробелы (presence, переименование, удаление, добавление участников).
+1. ~~Дефекты №1–№3~~ ✅; ~~№4–№6~~ ✅; №7 (выбор участников с `==`/`hashCode`) — последний
+   критичный, из-за него создание группы с повторным поиском даёт 400.
+2. №9–№16 — поведение под нагрузкой и обратная связь: error-кадры, пагинация, скролл,
+   всплывающие ошибки, системный «назад» (`PopScope`), лишний login при регистрации.
+3. №17–№20 — анализатор, тесты, мёртвый код.
+4. №21–№25 — платформенные конфиги, если нужны не-Android цели.
+5. Раздел 8 — функциональные пробелы (presence, переименование, удаление, добавление участников).

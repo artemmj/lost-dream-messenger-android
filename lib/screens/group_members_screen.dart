@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import '../models/chat.dart';
 import '../services/api.dart';
 import '../state/chat_state.dart';
+import '../state/auth_state.dart';
 
 class GroupMembersScreen extends StatelessWidget {
   final String chatId;
@@ -11,6 +11,7 @@ class GroupMembersScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final chat = context.watch<ChatState>();
+    final auth = context.watch<AuthState>();
     final detail = chat.currentChatDetail;
 
     return Scaffold(
@@ -28,12 +29,21 @@ class GroupMembersScreen extends StatelessWidget {
                       children: [
                         if (m.isAdmin)
                           const Chip(label: Text('админ')),
-                        if (m.user.id != context.read<ChatState>().selectedChatId)
+                        // Дефект №6: сравниваем ID пользователя с моим ID из AuthState, а не с ID чата.
+                        // Кнопка удаления показывается только для других участников.
+                        // Если я админ — могу удалять других.
+                        // Если не админ — могу удалить только себя (выйти из чата).
+                        if (m.user.id != auth.me?.id && detail.myIsAdmin)
                           IconButton(
                             icon: const Icon(Icons.remove_circle_outline),
-                            onPressed: detail.myIsAdmin
-                                ? () => _remove(context, m.user.id)
-                                : null,
+                            onPressed: () => _remove(context, m.user.id),
+                          ),
+                        // Кнопка «Выйти» для себя
+                        if (m.user.id == auth.me?.id)
+                          IconButton(
+                            icon: const Icon(Icons.exit_to_app),
+                            tooltip: 'Выйти из чата',
+                            onPressed: () => _leave(context),
                           ),
                       ],
                     ),
@@ -43,12 +53,43 @@ class GroupMembersScreen extends StatelessWidget {
     );
   }
 
+  /// Выйти из чата самому (дефект №6).
+  ///
+  /// Бэкенд позволяет участнику удалить себя из группы. После выхода закрываем чат
+  /// и возвращаемся к списку.
+  Future<void> _leave(BuildContext context) async {
+    final auth = context.read<AuthState>();
+    final myId = auth.me?.id;
+    if (myId == null) return;
+
+    try {
+      await Api().removeMember(chatId, myId); // Удаляем себя по своему ID
+      // После выхода закрываем чат и возвращаемся к списку
+      if (context.mounted) {
+        final chatState = context.read<ChatState>();
+        chatState.closeChat();
+        Navigator.pop(context);
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(e.toString())),
+        );
+      }
+    }
+  }
+
+  /// Удалить участника из группы (только для админов).
+  ///
+  /// Бэкенд не позволяет удалить единственного админа — в этом случае вернётся ошибка 400.
+  /// См. раздел 5 AGENTS.md «Контракт бэкенда».
   Future<void> _remove(BuildContext context, String userId) async {
     try {
       await Api().removeMember(chatId, userId);
       await context.read<ChatState>().loadChatDetails(chatId);
     } catch (e) {
       if (context.mounted) {
+        // Показываем сообщение об ошибке от бэкенда (например, «единственного админа удалить нельзя»)
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(e.toString())),
         );

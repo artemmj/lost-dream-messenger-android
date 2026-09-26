@@ -38,15 +38,14 @@ class _ChatsScreenState extends State<ChatsScreen> {
           IconButton(
             icon: const Icon(Icons.logout),
             onPressed: () async {
+              // Полная очистка состояния перед выходом
+              chat.clearAll();
               chat.closeNotificationsSocket();
               chat.closeChat();
+              
+              // Очищаем токены и сбрасываем состояние авторизации.
+              // _Boot автоматически покажет LoginScreen благодаря watch<AuthState>.
               await auth.logout();
-              if (context.mounted) {
-                Navigator.of(context).pushAndRemoveUntil(
-                  MaterialPageRoute(builder: (_) => const _RedirectToLogin()),
-                  (_) => false,
-                );
-              }
             },
           ),
         ],
@@ -101,10 +100,4 @@ class _ChatTile extends StatelessWidget {
       },
     );
   }
-}
-
-class _RedirectToLogin extends StatelessWidget {
-  const _RedirectToLogin();
-  @override
-  Widget build(BuildContext context) => const SizedBox.shrink();
 }
